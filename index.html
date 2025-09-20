@@ -1,0 +1,288 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+<title>視写プリントメーカー（SVGグリッド／自動改ページ）</title>
+
+<!-- 教科書体のフォールバック -->
+<link href="https://fonts.googleapis.com/css2?family=Klee+One:wght@400;600&family=Noto+Serif+JP:wght@500;700&display=swap" rel="stylesheet" />
+
+<style>
+  :root{
+    --cell: 52px;     /* マス一辺 */
+    --line:#60bdfc;   /* グリッド線 */
+    --frame:#60bdfc;  /* 用紙外枠 */
+    --thin:1px;       /* 線の太さ（画面） */
+    --maxw: 1120px;   /* 画面最大幅 */
+    --gap: 16px;      /* 左右シート間のすきま */
+
+    --font-kyokasho:
+      "UD Digi Kyokasho N-R","UD Digi Kyokasho N-B",
+      "Yu Kyokasho","YuKyokasho",
+      "Hiragino Kyoiku","HGS教科書体","HG教科書体",
+      "Klee One","Noto Serif JP",
+      "Hiragino Mincho ProN","Yu Mincho","MS Mincho",serif;
+  }
+
+  *{ box-sizing:border-box }
+  body{
+    margin:0; background:#fff; color:#111;
+    font-family: var(--font-kyokasho);
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+    -webkit-print-color-adjust:exact; print-color-adjust:exact;
+  }
+
+  /* ─ UI ─ */
+  header{
+    max-width:var(--maxw);
+    margin:16px auto 12px;
+    padding:0 12px;
+    display:grid; gap:10px;
+  }
+  textarea{
+    width:100%; height:120px; resize:vertical;
+    padding:10px; font-size:16px; line-height:1.6;
+    border:1px solid #e5e7eb; border-radius:10px;
+    font-family: var(--font-kyokasho);
+  }
+  .controls{ display:flex; flex-wrap:wrap; gap:10px; align-items:center }
+  .ctrl{ display:flex; align-items:center; gap:8px; border:1px solid #e5e7eb; border-radius:999px; padding:8px 12px }
+  input[type="range"]{ width:220px }
+  input[type="number"]{ width:84px; padding:6px 8px; border:1px solid #e5e7eb; border-radius:8px }
+  button{ border:0; border-radius:12px; padding:10px 16px; font-size:16px; color:#fff; background:#2563eb; cursor:pointer }
+  button.print{ background:#0ea5e9 }
+
+  /* ─ ページ（自動複製） ─ */
+  main#pages{ display:block }
+  .page{
+    max-width:var(--maxw);
+    margin:0 auto 24px;
+    padding:0 12px;
+    display:grid; grid-template-columns:1fr 1fr; gap:var(--gap);
+    break-inside: avoid; page-break-inside: avoid;
+  }
+  .page:not(:last-child){ break-after: page; page-break-after: always; }
+
+  /* ─ シート ─ */
+  .sheet{
+    border:3px solid var(--frame);
+    border-radius:10px;
+    padding:10px; /* JSの計算で使用 */
+  }
+  .title{ text-align:center; font-weight:700; margin-bottom:8px }
+
+  /* グリッド領域（右づめ） */
+  .gridArea{
+    position:relative;
+    margin-left:auto;           /* 右寄せ */
+    border-radius:4px;
+    overflow:hidden;
+  }
+  /* SVGグリッド（背景ではない＝確実に印刷される） */
+  .gridSVG{
+    position:absolute; inset:0;
+    width:100%; height:100%;
+    display:block; pointer-events:none;
+  }
+  .gridSVG path{
+    stroke: var(--line);
+    stroke-width: var(--thin);
+    fill: none;
+    shape-rendering: crispEdges;
+  }
+
+  /* 縦書き列 */
+  .cols{ position:relative; display:flex; flex-direction:row-reverse; align-items:flex-start }
+  .col { display:flex; flex-direction:column }
+
+  /* 1マス（縦組みの約物対応） */
+  .cell{
+    width:var(--cell); height:var(--cell);
+    display:flex; align-items:center; justify-content:center;
+    font-size:calc(var(--cell) * 0.56);
+    line-height:1;
+    background:transparent; color:#111;
+    font-family: var(--font-kyokasho);
+    writing-mode: vertical-rl;
+    text-orientation: mixed;
+    font-feature-settings: "vert" 1, "vkna" 1;
+  }
+
+  @media print{
+    @page { size: A4; margin: 10mm; }
+    header{ display:none }
+    .page{ padding:0; max-width:none; gap:var(--gap) }
+    /* 細線が飛ばないように印刷時は少し太らせる */
+    .gridSVG path{ stroke-width: .6px; }
+  }
+</style>
+</head>
+<body>
+  <header>
+    <textarea id="text" placeholder="文章を入力（空白・改行はそのまま反映）"></textarea>
+    <div class="controls">
+      <span class="ctrl">マス
+        <input type="range" id="size" min="36" max="88" value="52">
+        <b id="sizeVal">52px</b>
+      </span>
+      <span class="ctrl">1列の行数
+        <input type="number" id="rows" min="6" max="30" value="12">
+      </span>
+      <button id="make">作成</button>
+      <button class="print" onclick="window.print()">印刷</button>
+    </div>
+  </header>
+
+  <main id="pages"></main>
+
+<script>
+const $ = s => document.querySelector(s);
+const root = document.documentElement;
+const pagesEl = $('#pages');
+const sizeEl=$('#size'), sizeVal=$('#sizeVal'), rowsEl=$('#rows'), textEl=$('#text');
+
+sizeEl.addEventListener('input', ()=>{
+  root.style.setProperty('--cell', sizeEl.value+'px');
+  sizeVal.textContent = sizeEl.value+'px';
+});
+$('#make').addEventListener('click', render);
+
+/* グラフェム分割（合字・絵文字対応） */
+function toGraphemes(s){
+  if (typeof Intl !== 'undefined' && Intl.Segmenter){
+    const seg = new Intl.Segmenter('ja', {granularity:'grapheme'});
+    return Array.from(seg.segment(s), x=>x.segment);
+  }
+  return Array.from(s);
+}
+
+/* ページDOMを生成 */
+function newPage(){
+  const page = document.createElement('section');
+  page.className = 'page';
+
+  const sheetL = document.createElement('section');
+  sheetL.className = 'sheet';
+  sheetL.innerHTML = `
+    <div class="title">お手本</div>
+    <div class="gridArea">
+      <svg class="gridSVG" aria-hidden="true"></svg>
+      <div class="cols"></div>
+    </div>`;
+
+  const sheetR = document.createElement('section');
+  sheetR.className = 'sheet';
+  sheetR.innerHTML = `
+    <div class="title">なぞる</div>
+    <div class="gridArea">
+      <svg class="gridSVG" aria-hidden="true"></svg>
+      <div class="cols"></div>
+    </div>`;
+
+  page.appendChild(sheetL);
+  page.appendChild(sheetR);
+  pagesEl.appendChild(page);
+
+  const leftArea  = sheetL.querySelector('.gridArea');
+  const rightArea = sheetR.querySelector('.gridArea');
+  const leftCols  = leftArea.querySelector('.cols');
+  const rightCols = rightArea.querySelector('.cols');
+  const leftSVG   = leftArea.querySelector('.gridSVG');
+  const rightSVG  = rightArea.querySelector('.gridSVG');
+
+  // 1ページ内の最大列数
+  const sheetWidth = sheetL.clientWidth;
+  const cs = getComputedStyle(sheetL);
+  const pad = parseFloat(cs.paddingLeft) + parseFloat(cs.paddingRight);
+  const cell = parseFloat(getComputedStyle(root).getPropertyValue('--cell')) || 52;
+  const colsCap = Math.max(1, Math.floor((sheetWidth - pad) / cell));
+
+  return { page, leftArea, rightArea, leftCols, rightCols, leftSVG, rightSVG, colsCap, cols:0 };
+}
+
+function makeCol(){ const d=document.createElement('div'); d.className='col'; return d; }
+function makeCell(text=''){ const d=document.createElement('div'); d.className='cell'; d.textContent=text; return d; }
+
+/* スペースは空マス表示（半角/全角） */
+function displayChar(u){ return (u===' ' || u==='\u3000') ? '' : u; }
+
+/* SVG にグリッドを描画（背景依存しない） */
+function drawGrid(svg, cols, rows, cell){
+  const w = cols * cell, h = rows * cell;
+  svg.setAttribute('viewBox', `0 0 ${w} ${h}`);
+  svg.setAttribute('width', w);
+  svg.setAttribute('height', h);
+
+  let d = '';
+  // 縦線
+  for (let x=0; x<=w; x+=cell){ d += `M${x} 0V${h}`; }
+  // 横線
+  for (let y=0; y<=h; y+=cell){ d += `M0 ${y}H${w}`; }
+
+  // 既存のパスを再利用 or 置換
+  let path = svg.querySelector('path');
+  if(!path){ path = document.createElementNS('http://www.w3.org/2000/svg','path'); svg.appendChild(path); }
+  path.setAttribute('d', d);
+}
+
+function render(){
+  pagesEl.innerHTML = '';
+
+  const cell = parseFloat(getComputedStyle(root).getPropertyValue('--cell')) || 52;
+  const rows = Math.max(1, parseInt(rowsEl.value || '12', 10));
+  const raw  = (textEl.value || '').replace(/\r\n?/g, '\n'); // CRLF→LF
+  const units = toGraphemes(raw);
+
+  let page = newPage();
+  page.leftArea.style.height  = page.rightArea.style.height = (rows * cell) + 'px';
+
+  let r = 0;                      // 現在の行
+  let colL = null, colR = null;
+
+  function openColumn(){
+    // いっぱいなら新しいページ
+    if (page.cols >= page.colsCap){
+      page = newPage();
+      page.leftArea.style.height  = page.rightArea.style.height = (rows * cell) + 'px';
+      r = 0;
+    }
+    colL = makeCol(); colR = makeCol();
+    page.leftCols.appendChild(colL);
+    page.rightCols.appendChild(colR);
+    page.cols++;
+
+    const w = (page.cols * cell) + 'px';
+    page.leftArea.style.width  = w;
+    page.rightArea.style.width = w;
+
+    // SVGグリッドを再描画
+    drawGrid(page.leftSVG,  page.cols, rows, cell);
+    drawGrid(page.rightSVG, page.cols, rows, cell);
+  }
+
+  openColumn(); // 最初の列
+
+  for(const u of units){
+    if(u === '\n'){          // 改行：次の列
+      openColumn();
+      continue;
+    }
+    colL.appendChild(makeCell(displayChar(u)));  // 左：お手本
+    colR.appendChild(makeCell(''));              // 右：空マス
+    r++;
+    if(r >= rows){
+      r = 0;
+      openColumn();
+    }
+  }
+}
+
+// 初期表示
+root.style.setProperty('--cell', sizeEl.value + 'px');
+sizeVal.textContent = sizeEl.value + 'px';
+render();
+</script>
+</body>
+</html>
