@@ -3,9 +3,9 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
-<title>視写プリントメーカー（SVGグリッド／自動改ページ）</title>
+<title>視写プリントメーカー（不可視文字対策／縦書き／自動改ページ）</title>
 
-<!-- 教科書体のフォールバック -->
+<!-- 教科書体のフォールバック（端末に教科書体が無い場合用） -->
 <link href="https://fonts.googleapis.com/css2?family=Klee+One:wght@400;600&family=Noto+Serif+JP:wght@500;700&display=swap" rel="stylesheet" />
 
 <style>
@@ -13,10 +13,11 @@
     --cell: 52px;     /* マス一辺 */
     --line:#60bdfc;   /* グリッド線 */
     --frame:#60bdfc;  /* 用紙外枠 */
-    --thin:1px;       /* 線の太さ（画面） */
-    --maxw: 1120px;   /* 画面最大幅 */
+    --thin:1px;       /* 画面表示の線幅 */
+    --maxw: 1120px;   /* ページの最大幅 */
     --gap: 16px;      /* 左右シート間のすきま */
 
+    /* 教科書体優先 → Klee One → Noto Serif JP → 明朝系 */
     --font-kyokasho:
       "UD Digi Kyokasho N-R","UD Digi Kyokasho N-B",
       "Yu Kyokasho","YuKyokasho",
@@ -37,8 +38,7 @@
   /* ─ UI ─ */
   header{
     max-width:var(--maxw);
-    margin:16px auto 12px;
-    padding:0 12px;
+    margin:16px auto 12px; padding:0 12px;
     display:grid; gap:10px;
   }
   textarea{
@@ -58,8 +58,7 @@
   main#pages{ display:block }
   .page{
     max-width:var(--maxw);
-    margin:0 auto 24px;
-    padding:0 12px;
+    margin:0 auto 24px; padding:0 12px;
     display:grid; grid-template-columns:1fr 1fr; gap:var(--gap);
     break-inside: avoid; page-break-inside: avoid;
   }
@@ -69,31 +68,28 @@
   .sheet{
     border:3px solid var(--frame);
     border-radius:10px;
-    padding:10px; /* JSの計算で使用 */
+    padding:10px; /* JS の列上限計算で使用 */
   }
   .title{ text-align:center; font-weight:700; margin-bottom:8px }
 
-  /* グリッド領域（右づめ） */
+  /* ─ グリッド領域（右寄せ） ─ */
   .gridArea{
     position:relative;
-    margin-left:auto;           /* 右寄せ */
-    border-radius:4px;
-    overflow:hidden;
+    margin-left:auto;         /* 右づめ */
+    border-radius:4px; overflow:hidden;
   }
-  /* SVGグリッド（背景ではない＝確実に印刷される） */
+  /* SVG グリッド：背景ではないので確実に印刷される */
   .gridSVG{
     position:absolute; inset:0;
-    width:100%; height:100%;
-    display:block; pointer-events:none;
+    width:100%; height:100%; display:block; pointer-events:none;
   }
   .gridSVG path{
     stroke: var(--line);
     stroke-width: var(--thin);
-    fill: none;
-    shape-rendering: crispEdges;
+    fill:none; shape-rendering:crispEdges;
   }
 
-  /* 縦書き列 */
+  /* 縦書き列（右→左に増える） */
   .cols{ position:relative; display:flex; flex-direction:row-reverse; align-items:flex-start }
   .col { display:flex; flex-direction:column }
 
@@ -105,23 +101,23 @@
     line-height:1;
     background:transparent; color:#111;
     font-family: var(--font-kyokasho);
-    writing-mode: vertical-rl;
-    text-orientation: mixed;
-    font-feature-settings: "vert" 1, "vkna" 1;
+
+    writing-mode: vertical-rl;      /* 縦書き */
+    text-orientation: mixed;        /* 和文は縦用字形、ASCII は回転 */
+    font-feature-settings: "vert" 1, "vkna" 1; /* 保険で縦組み機能を明示 */
   }
 
   @media print{
     @page { size: A4; margin: 10mm; }
     header{ display:none }
     .page{ padding:0; max-width:none; gap:var(--gap) }
-    /* 細線が飛ばないように印刷時は少し太らせる */
-    .gridSVG path{ stroke-width: .6px; }
+    .gridSVG path{ stroke-width:.6px } /* 細線が飛ばないよう微増 */
   }
 </style>
 </head>
 <body>
   <header>
-    <textarea id="text" placeholder="文章を入力（空白・改行はそのまま反映）"></textarea>
+    <textarea id="text" placeholder="文章を入力（空白は空マス／改行は改段）"></textarea>
     <div class="controls">
       <span class="ctrl">マス
         <input type="range" id="size" min="36" max="88" value="52">
@@ -149,7 +145,31 @@ sizeEl.addEventListener('input', ()=>{
 });
 $('#make').addEventListener('click', render);
 
-/* グラフェム分割（合字・絵文字対応） */
+/* 不可視文字・特殊スペースを徹底クリーンアップしてから流し込む */
+function sanitizeInput(raw){
+  // 1) 正規化（濁点の合成揺れなどを統一）
+  let s = (raw || '').normalize('NFC');
+
+  // 2) 改行は LF に統一、タブはスペースへ
+  s = s.replace(/\r\n?/g, '\n').replace(/\t/g, ' ');
+
+  // 3) すべての「スペース区分」を半角スペースに統一（全角スペース含む）
+  //    \p{Zs} = Space_Separator
+  s = s.replace(/\p{Zs}|\u3000/gu, ' ');
+
+  // 4) 制御文字(Cc)・書式文字(Cf)は削除（ただし改行は残す）
+  s = s.replace(/[\p{Cc}\p{Cf}]/gu, ch => (ch === '\n' ? '\n' : ''));
+
+  // 5) バリアントセレクタを削除（VS1–16 / IVS：U+E0100–U+E01EF）
+  s = s.replace(/[\uFE00-\uFE0F]|\u{E0100}-\u{E01EF}/gu, '');
+
+  // 6) 残存する結合記号（ダイアクリティカルマーク等）は念のため削除
+  s = s.replace(/\p{M}+/gu, '');
+
+  return s;
+}
+
+/* グラフェム単位に分割（絵文字・合字も1文字扱い） */
 function toGraphemes(s){
   if (typeof Intl !== 'undefined' && Intl.Segmenter){
     const seg = new Intl.Segmenter('ja', {granularity:'grapheme'});
@@ -158,7 +178,7 @@ function toGraphemes(s){
   return Array.from(s);
 }
 
-/* ページDOMを生成 */
+/* ページ DOM を生成 */
 function newPage(){
   const page = document.createElement('section');
   page.className = 'page';
@@ -192,7 +212,7 @@ function newPage(){
   const leftSVG   = leftArea.querySelector('.gridSVG');
   const rightSVG  = rightArea.querySelector('.gridSVG');
 
-  // 1ページ内の最大列数
+  // 1ページに収まる最大列数（シート幅から算出）
   const sheetWidth = sheetL.clientWidth;
   const cs = getComputedStyle(sheetL);
   const pad = parseFloat(cs.paddingLeft) + parseFloat(cs.paddingRight);
@@ -204,24 +224,17 @@ function newPage(){
 
 function makeCol(){ const d=document.createElement('div'); d.className='col'; return d; }
 function makeCell(text=''){ const d=document.createElement('div'); d.className='cell'; d.textContent=text; return d; }
+const isDisplaySpace = ch => ch === ' ';
 
-/* スペースは空マス表示（半角/全角） */
-function displayChar(u){ return (u===' ' || u==='\u3000') ? '' : u; }
-
-/* SVG にグリッドを描画（背景依存しない） */
+/* SVG にグリッド線を描画（背景に依存しない） */
 function drawGrid(svg, cols, rows, cell){
   const w = cols * cell, h = rows * cell;
   svg.setAttribute('viewBox', `0 0 ${w} ${h}`);
   svg.setAttribute('width', w);
   svg.setAttribute('height', h);
-
   let d = '';
-  // 縦線
   for (let x=0; x<=w; x+=cell){ d += `M${x} 0V${h}`; }
-  // 横線
   for (let y=0; y<=h; y+=cell){ d += `M0 ${y}H${w}`; }
-
-  // 既存のパスを再利用 or 置換
   let path = svg.querySelector('path');
   if(!path){ path = document.createElementNS('http://www.w3.org/2000/svg','path'); svg.appendChild(path); }
   path.setAttribute('d', d);
@@ -232,17 +245,19 @@ function render(){
 
   const cell = parseFloat(getComputedStyle(root).getPropertyValue('--cell')) || 52;
   const rows = Math.max(1, parseInt(rowsEl.value || '12', 10));
-  const raw  = (textEl.value || '').replace(/\r\n?/g, '\n'); // CRLF→LF
-  const units = toGraphemes(raw);
+
+  // 入力をクリーンアップ → 改行は残す（改行＝改段）
+  const sanitized = sanitizeInput(textEl.value);
+  const units = toGraphemes(sanitized);
 
   let page = newPage();
   page.leftArea.style.height  = page.rightArea.style.height = (rows * cell) + 'px';
 
-  let r = 0;                      // 現在の行
+  let r = 0;                      // 現在の行（0..rows-1）
   let colL = null, colR = null;
 
   function openColumn(){
-    // いっぱいなら新しいページ
+    // 現在のページでこれ以上置けない → 新しいページ
     if (page.cols >= page.colsCap){
       page = newPage();
       page.leftArea.style.height  = page.rightArea.style.height = (rows * cell) + 'px';
@@ -257,7 +272,6 @@ function render(){
     page.leftArea.style.width  = w;
     page.rightArea.style.width = w;
 
-    // SVGグリッドを再描画
     drawGrid(page.leftSVG,  page.cols, rows, cell);
     drawGrid(page.rightSVG, page.cols, rows, cell);
   }
@@ -265,17 +279,14 @@ function render(){
   openColumn(); // 最初の列
 
   for(const u of units){
-    if(u === '\n'){          // 改行：次の列
-      openColumn();
+    if(u === '\n'){               // 改行 → 次の列へ
+      r = 0; openColumn();
       continue;
     }
-    colL.appendChild(makeCell(displayChar(u)));  // 左：お手本
-    colR.appendChild(makeCell(''));              // 右：空マス
+    colL.appendChild(makeCell(isDisplaySpace(u) ? '' : u));  // スペースは空マス表示
+    colR.appendChild(makeCell(''));                          // 右は空マス
     r++;
-    if(r >= rows){
-      r = 0;
-      openColumn();
-    }
+    if(r >= rows){ r = 0; openColumn(); }
   }
 }
 
