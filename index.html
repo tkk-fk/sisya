@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
-<title>視写プリントメーカー（不可視文字対策／縦書き／自動改ページ）</title>
+<title>視写プリントメーカー（不可視文字対策／縦書き／自動改ページ／利き手対応）</title>
 
 <!-- 教科書体のフォールバック（端末に教科書体が無い場合用） -->
 <link href="https://fonts.googleapis.com/css2?family=Klee+One:wght@400;600&family=Noto+Serif+JP:wght@500;700&display=swap" rel="stylesheet" />
@@ -49,6 +49,7 @@
   }
   .controls{ display:flex; flex-wrap:wrap; gap:10px; align-items:center }
   .ctrl{ display:flex; align-items:center; gap:8px; border:1px solid #e5e7eb; border-radius:999px; padding:8px 12px }
+  .ctrl label{ display:inline-flex; align-items:center; gap:4px; cursor:pointer }
   input[type="range"]{ width:220px }
   input[type="number"]{ width:84px; padding:6px 8px; border:1px solid #e5e7eb; border-radius:8px }
   button{ border:0; border-radius:12px; padding:10px 16px; font-size:16px; color:#fff; background:#2563eb; cursor:pointer }
@@ -76,7 +77,7 @@
   .gridArea{
     position:relative;
     margin-left:auto;         /* 右づめ */
-    border-radius:4px; overflow:hidden;
+    border-radius:4px; overflow:hidden; /* ここでクリップされるため、SVG側で外枠線が欠けないように調整 */
   }
   /* SVG グリッド：背景ではないので確実に印刷される */
   .gridSVG{
@@ -87,6 +88,7 @@
     stroke: var(--line);
     stroke-width: var(--thin);
     fill:none; shape-rendering:crispEdges;
+    vector-effect: non-scaling-stroke; /* 印刷時の拡大縮小でも線幅を保つ */
   }
 
   /* 縦書き列（右→左に増える） */
@@ -126,6 +128,10 @@
       <span class="ctrl">1列の行数
         <input type="number" id="rows" min="6" max="30" value="12">
       </span>
+      <span class="ctrl">利き手
+        <label><input type="radio" name="hand" value="right" checked>右利き</label>
+        <label><input type="radio" name="hand" value="left">左利き</label>
+      </span>
       <button id="make">作成</button>
       <button class="print" onclick="window.print()">印刷</button>
     </div>
@@ -134,6 +140,7 @@
   <main id="pages"></main>
 
 <script>
+/* ===== ユーティリティ ===== */
 const $ = s => document.querySelector(s);
 const root = document.documentElement;
 const pagesEl = $('#pages');
@@ -144,6 +151,15 @@ sizeEl.addEventListener('input', ()=>{
   sizeVal.textContent = sizeEl.value+'px';
 });
 $('#make').addEventListener('click', render);
+
+document.querySelectorAll('input[name="hand"]').forEach(el=>{
+  el.addEventListener('change', render);
+});
+
+function currentHand(){
+  const el = document.querySelector('input[name="hand"]:checked');
+  return el ? el.value : 'right';
+}
 
 /* 不可視文字・特殊スペースを徹底クリーンアップしてから流し込む */
 function sanitizeInput(raw){
@@ -161,7 +177,7 @@ function sanitizeInput(raw){
   s = s.replace(/[\p{Cc}\p{Cf}]/gu, ch => (ch === '\n' ? '\n' : ''));
 
   // 5) バリアントセレクタを削除（VS1–16 / IVS：U+E0100–U+E01EF）
-  s = s.replace(/[\uFE00-\uFE0F]|\u{E0100}-\u{E01EF}/gu, '');
+  s = s.replace(/[\uFE00-\uFE0F]|[\u{E0100}-\u{E01EF}]/gu, '');
 
   // 6) 残存する結合記号（ダイアクリティカルマーク等）は念のため削除
   s = s.replace(/\p{M}+/gu, '');
@@ -178,48 +194,59 @@ function toGraphemes(s){
   return Array.from(s);
 }
 
-/* ページ DOM を生成 */
-function newPage(){
+/* ── DOM生成ヘルパ ── */
+function makeSheet(title){
+  const sec=document.createElement('section');
+  sec.className='sheet';
+  sec.innerHTML = `
+    <div class="title">${title}</div>
+    <div class="gridArea">
+      <svg class="gridSVG" aria-hidden="true"></svg>
+      <div class="cols"></div>
+    </div>`;
+  return sec;
+}
+
+/* ページ DOM を生成（hand: 'right' | 'left'）*/
+function newPage(hand){
   const page = document.createElement('section');
   page.className = 'page';
 
-  const sheetL = document.createElement('section');
-  sheetL.className = 'sheet';
-  sheetL.innerHTML = `
-    <div class="title">お手本</div>
-    <div class="gridArea">
-      <svg class="gridSVG" aria-hidden="true"></svg>
-      <div class="cols"></div>
-    </div>`;
+  const leftTitle  = hand === 'left'  ? 'うつす' : 'お手本';
+  const rightTitle = hand === 'left'  ? 'お手本' : 'うつす';
 
-  const sheetR = document.createElement('section');
-  sheetR.className = 'sheet';
-  sheetR.innerHTML = `
-    <div class="title">うつす</div>
-    <div class="gridArea">
-      <svg class="gridSVG" aria-hidden="true"></svg>
-      <div class="cols"></div>
-    </div>`;
-
-  page.appendChild(sheetL);
-  page.appendChild(sheetR);
+  const leftSheet  = makeSheet(leftTitle);
+  const rightSheet = makeSheet(rightTitle);
+  page.appendChild(leftSheet);
+  page.appendChild(rightSheet);
   pagesEl.appendChild(page);
 
-  const leftArea  = sheetL.querySelector('.gridArea');
-  const rightArea = sheetR.querySelector('.gridArea');
+  const leftArea  = leftSheet.querySelector('.gridArea');
+  const rightArea = rightSheet.querySelector('.gridArea');
   const leftCols  = leftArea.querySelector('.cols');
   const rightCols = rightArea.querySelector('.cols');
   const leftSVG   = leftArea.querySelector('.gridSVG');
   const rightSVG  = rightArea.querySelector('.gridSVG');
 
-  // 1ページに収まる最大列数（シート幅から算出）
-  const sheetWidth = sheetL.clientWidth;
-  const cs = getComputedStyle(sheetL);
+  // 1ページに収まる最大列数（左シート幅から算出）
+  const sheetWidth = leftSheet.clientWidth;
+  const cs = getComputedStyle(leftSheet);
   const pad = parseFloat(cs.paddingLeft) + parseFloat(cs.paddingRight);
   const cell = parseFloat(getComputedStyle(root).getPropertyValue('--cell')) || 52;
   const colsCap = Math.max(1, Math.floor((sheetWidth - pad) / cell));
 
-  return { page, leftArea, rightArea, leftCols, rightCols, leftSVG, rightSVG, colsCap, cols:0 };
+  // お手本（model）側と、うつす（copy）側を決める
+  const modelIsLeft = (leftTitle === 'お手本');
+  const modelArea = modelIsLeft ? leftArea : rightArea;
+  const copyArea  = modelIsLeft ? rightArea : leftArea;
+  const modelCols = modelIsLeft ? leftCols : rightCols;
+  const copyCols  = modelIsLeft ? rightCols : leftCols;
+  const modelSVG  = modelIsLeft ? leftSVG  : rightSVG;
+  const copySVG   = modelIsLeft ? rightSVG : leftSVG;
+
+  return { page, hand, leftArea, rightArea, leftCols, rightCols, leftSVG, rightSVG,
+           modelArea, copyArea, modelCols, copyCols, modelSVG, copySVG,
+           colsCap, cols:0 };
 }
 
 function makeCol(){ const d=document.createElement('div'); d.className='col'; return d; }
@@ -228,10 +255,14 @@ const isDisplaySpace = ch => ch === ' ';
 
 /* SVG にグリッド線を描画（背景に依存しない） */
 function drawGrid(svg, cols, rows, cell){
-  const w = cols * cell, h = rows * cell;
-  svg.setAttribute('viewBox', `0 0 ${w} ${h}`);
+  const w = Math.round(cols * cell), h = Math.round(rows * cell);
+
+  // ▼外枠の線がクリップされないように、viewBoxを上下左右に0.5pxずつ広げる
+  const half = 0.5;
+  svg.setAttribute('viewBox', `${-half} ${-half} ${w + 1} ${h + 1}`);
   svg.setAttribute('width', w);
   svg.setAttribute('height', h);
+
   let d = '';
   for (let x=0; x<=w; x+=cell){ d += `M${x} 0V${h}`; }
   for (let y=0; y<=h; y+=cell){ d += `M0 ${y}H${w}`; }
@@ -240,40 +271,42 @@ function drawGrid(svg, cols, rows, cell){
   path.setAttribute('d', d);
 }
 
+/* ===== メイン描画 ===== */
 function render(){
   pagesEl.innerHTML = '';
 
   const cell = parseFloat(getComputedStyle(root).getPropertyValue('--cell')) || 52;
   const rows = Math.max(1, parseInt(rowsEl.value || '12', 10));
+  const hand = currentHand();
 
   // 入力をクリーンアップ → 改行は残す（改行＝改段）
   const sanitized = sanitizeInput(textEl.value);
   const units = toGraphemes(sanitized);
 
-  let page = newPage();
-  page.leftArea.style.height  = page.rightArea.style.height = (rows * cell) + 'px';
+  let page = newPage(hand);
+  page.modelArea.style.height = page.copyArea.style.height = (rows * cell) + 'px';
 
   let r = 0;                      // 現在の行（0..rows-1）
-  let colL = null, colR = null;
+  let colModel = null, colCopy = null;
 
   function openColumn(){
     // 現在のページでこれ以上置けない → 新しいページ
     if (page.cols >= page.colsCap){
-      page = newPage();
-      page.leftArea.style.height  = page.rightArea.style.height = (rows * cell) + 'px';
+      page = newPage(hand);
+      page.modelArea.style.height = page.copyArea.style.height = (rows * cell) + 'px';
       r = 0;
     }
-    colL = makeCol(); colR = makeCol();
-    page.leftCols.appendChild(colL);
-    page.rightCols.appendChild(colR);
+    colModel = makeCol(); colCopy = makeCol();
+    page.modelCols.appendChild(colModel);
+    page.copyCols.appendChild(colCopy);
     page.cols++;
 
     const w = (page.cols * cell) + 'px';
-    page.leftArea.style.width  = w;
-    page.rightArea.style.width = w;
+    page.modelArea.style.width = w;
+    page.copyArea.style.width  = w;
 
-    drawGrid(page.leftSVG,  page.cols, rows, cell);
-    drawGrid(page.rightSVG, page.cols, rows, cell);
+    drawGrid(page.modelSVG, page.cols, rows, cell);
+    drawGrid(page.copySVG,  page.cols, rows, cell);
   }
 
   openColumn(); // 最初の列
@@ -283,8 +316,8 @@ function render(){
       r = 0; openColumn();
       continue;
     }
-    colL.appendChild(makeCell(isDisplaySpace(u) ? '' : u));  // スペースは空マス表示
-    colR.appendChild(makeCell(''));                          // 右は空マス
+    page.modelCols.lastElementChild.appendChild(makeCell(isDisplaySpace(u) ? '' : u));  // お手本側に文字
+    page.copyCols.lastElementChild.appendChild(makeCell(''));                            // うつす側は空マス
     r++;
     if(r >= rows){ r = 0; openColumn(); }
   }
@@ -294,6 +327,40 @@ function render(){
 root.style.setProperty('--cell', sizeEl.value + 'px');
 sizeVal.textContent = sizeEl.value + 'px';
 render();
+
+/* ===== 自動テスト（簡易） =====
+   コンソールに結果を出力します。UIには影響しません。 */
+(function runSelfTests(){
+  const results = [];
+  function assert(name, cond){ results.push({name, pass: !!cond}); }
+
+  // sanitize: 全角スペース・Nbsp・制御文字が処理されること
+  const raw = 'あ\u00A0い　う\tえ\r\nお';
+  const s = sanitizeInput(raw);
+  assert('sanitize replaces all spaces with half-width', !(/[\u00A0\u3000]/.test(s)));
+  assert('sanitize keeps newlines', /\n/.test(s));
+
+  // graphemes: 絵文字を壊さない
+  const emo = '👨\u200D👩\u200D👦';
+  const gs = toGraphemes(emo);
+  assert('grapheme segmentation preserves string', gs.join('') === emo);
+
+  // newPage が必要キーを返す
+  const tmp = newPage('right');
+  assert('newPage returns colsCap >= 1', tmp.colsCap >= 1);
+
+  // render が例外を投げない（右/左）
+  try { render(); assert('render() right-hand no throw', true); } catch(e){ assert('render() right-hand threw', false); }
+  document.querySelector('input[name="hand"][value="left"]').checked = true;
+  try { render(); assert('render() left-hand no throw', true); } catch(e){ assert('render() left-hand threw', false); }
+  document.querySelector('input[name="hand"][value="right"]').checked = true; // 戻す
+
+  // 結果表示
+  const ok = results.every(r=>r.pass);
+  console.groupCollapsed(`自動テスト: ${ok ? 'ALL PASS' : 'SOME FAIL'}`);
+  results.forEach(r=> console[r.pass ? 'log' : 'error'](`${r.pass ? '✅' : '❌'} ${r.name}`));
+  console.groupEnd();
+})();
 </script>
 </body>
 </html>
